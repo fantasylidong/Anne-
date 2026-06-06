@@ -1,0 +1,48 @@
+[gui]
+language = "zh-CN"
+anne_stats = true
+theme_mode = "light"
+accent_color = "#0f766e"
+auto_refresh_empty_secs = 120
+auto_refresh_active_secs = 30
+auto_refresh_selected_secs = 5
+time_zone = "system"
+# RCON 密码可在桌面界面勾选保存后自动写入。
+# [gui.rcon_passwords]
+# "127.0.0.1:27015" = "change-me"
+
+[updater]
+auto_check = true
+
+[api]
+base_url = "https://anne.trygek.com"
+# Steam 登录后会自动写入 token。
+# token = "aw_xxx"
+
+[master]
+enabled = true
+group = "公网大厅"
+address = "hl2master.steampowered.com:27011"
+region = "all"
+filter = "\\appid\\550"
+extra_filter = ["\\secure\\1"]
+limit = 200
+
+[[groups]]
+name = "我的服务器"
+servers = [
+  "127.0.0.1:27015",
+  "steam://connect/127.0.0.1:27016",
+]
+
+[[sourcebans]]
+name = "Anne 网页订阅"
+url = "https://anne.trygek.com/bans/index.php?p=servers"
+
+# 普通网页或粘贴文本也可以作为订阅来源。
+# [[sourcebans]]
+# name = "粘贴文本订阅"
+# text = """
+# steam://connect/127.0.0.1:27017
+# example.org:27018
+# """
