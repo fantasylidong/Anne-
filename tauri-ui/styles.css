@@ -1084,9 +1084,12 @@ tr:last-child td {
   border-top: 1px solid var(--border);
   background: var(--surface-soft);
 }
-.rcon-input-group input {
+.rcon-input-group textarea {
   flex: 1;
   min-width: 0;
+  min-height: 54px;
+  max-height: 140px;
+  resize: vertical;
 }
 
 .rcon-input-group .rcon-save {

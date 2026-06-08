@@ -1,6 +1,6 @@
 [package]
 name = "Anne刷服器"
-version = "1.3.0"
+version = "1.3.2"
 edition = "2021"
 description = "Standalone Left 4 Dead 2 server browser with subscriptions, RCON, and AnneWeb integration."
 license = "GPL-3.0-or-later"

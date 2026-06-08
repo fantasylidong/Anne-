@@ -13,6 +13,7 @@ const SELECTED_REFRESH_DEFAULT_SECS = 5;
 const BROADCAST_REFRESH_INTERVAL_MS = 30 * 1000;
 const ANON_READ_CACHE_MS = 10 * 60 * 1000;
 const AUTH_READ_CACHE_MS = 60 * 1000;
+const RCON_HISTORY_LIMIT = 50;
 const ANNE_PLAYER_STATS_BASE_URL = "https://anne.trygek.com/stats/ranking/player.php";
 
 const state = {
@@ -57,6 +58,10 @@ const state = {
   broadcastHistoryAuthKey: "",
   broadcastHistoryNotice: "",
   broadcastHistoryInFlight: false,
+  rconSending: false,
+  rconCommandHistory: [],
+  rconHistoryIndex: 0,
+  rconDraftCommand: "",
   updatePageUrl: "",
   updateDownloadUrl: "",
   updateDownloadName: "",
@@ -1429,30 +1434,126 @@ async function refreshInspector() {
   }
 }
 
+function splitRconCommands(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((command) => command.trim())
+    .filter(Boolean);
+}
+
+function resetRconHistoryCursor() {
+  state.rconHistoryIndex = state.rconCommandHistory.length;
+  state.rconDraftCommand = "";
+}
+
+function rememberRconCommand(value) {
+  const command = String(value || "").trim();
+  if (!command) return;
+  state.rconCommandHistory = state.rconCommandHistory.filter((item) => item !== command);
+  state.rconCommandHistory.push(command);
+  if (state.rconCommandHistory.length > RCON_HISTORY_LIMIT) {
+    state.rconCommandHistory.splice(0, state.rconCommandHistory.length - RCON_HISTORY_LIMIT);
+  }
+  resetRconHistoryCursor();
+}
+
+function setRconCommandValue(input, value) {
+  input.value = value;
+  requestAnimationFrame(() => {
+    input.selectionStart = input.value.length;
+    input.selectionEnd = input.value.length;
+  });
+}
+
+function handleRconHistoryNavigation(event) {
+  const input = event.currentTarget;
+  if (!state.rconCommandHistory.length) return false;
+
+  const selectionStart = input.selectionStart ?? 0;
+  const selectionEnd = input.selectionEnd ?? selectionStart;
+  if (selectionStart !== selectionEnd) return false;
+
+  const beforeCursor = input.value.slice(0, selectionStart);
+  const afterCursor = input.value.slice(selectionEnd);
+  if (event.key === "ArrowUp" && beforeCursor.includes("\n")) return false;
+  if (event.key === "ArrowDown" && afterCursor.includes("\n")) return false;
+
+  if (state.rconHistoryIndex === state.rconCommandHistory.length) {
+    state.rconDraftCommand = input.value;
+  }
+
+  if (event.key === "ArrowUp") {
+    state.rconHistoryIndex = Math.max(0, state.rconHistoryIndex - 1);
+  } else {
+    state.rconHistoryIndex = Math.min(
+      state.rconCommandHistory.length,
+      state.rconHistoryIndex + 1,
+    );
+  }
+
+  const value = state.rconHistoryIndex === state.rconCommandHistory.length
+    ? state.rconDraftCommand
+    : state.rconCommandHistory[state.rconHistoryIndex];
+  setRconCommandValue(input, value);
+  return true;
+}
+
+function handleRconCommandKeydown(event) {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    sendRcon();
+    return;
+  }
+
+  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    if (handleRconHistoryNavigation(event)) {
+      event.preventDefault();
+    }
+  }
+}
+
 async function sendRcon() {
+  if (state.rconSending) return;
   const password = $("#rconPassword").value.trim();
-  const command = $("#rconCommand").value;
-  if (!password || !command || !state.selectedAddress) return;
-  
+  const input = $("#rconCommand");
+  const commands = splitRconCommands(input.value);
+  if (!password || commands.length === 0 || !state.selectedAddress) return;
+
   const term = $("#rconTerminal");
-  term.textContent += `\n> ${command}\n`;
+  const sendButton = $("#rconSendBtn");
+  const address = state.selectedAddress;
+  commands.forEach(rememberRconCommand);
+  state.rconSending = true;
+  sendButton.disabled = true;
   try {
     if ($("#saveRconPasswordInput").checked) {
-      await saveRconPassword(password, state.selectedAddress);
+      await saveRconPassword(password, address);
     }
-    const res = await invoke("run_rcon", { req: {
-      config_path: state.configPath,
-      address: state.selectedAddress,
-      password,
-      command,
-      timeout_ms: 5000
-    }});
-    term.textContent += res + "\n";
+    for (const command of commands) {
+      term.textContent += `\n> ${command}\n`;
+      try {
+        const res = await invoke("run_rcon", { req: {
+          config_path: state.configPath,
+          address,
+          password,
+          command,
+          timeout_ms: 5000
+        }});
+        term.textContent += `${res || ""}\n`;
+      } catch (e) {
+        term.textContent += `Error: ${e}\n`;
+      }
+      term.scrollTop = term.scrollHeight;
+    }
   } catch (e) {
     term.textContent += `Error: ${e}\n`;
+  } finally {
+    state.rconSending = false;
+    sendButton.disabled = false;
+    term.scrollTop = term.scrollHeight;
+    input.value = "";
+    resetRconHistoryCursor();
   }
-  term.scrollTop = term.scrollHeight;
-  $("#rconCommand").value = "";
 }
 
 
@@ -2084,8 +2185,9 @@ function bindEvents() {
     tab.addEventListener("click", () => setInspectorTab(tab.dataset.ins));
   });
   $("#rconSendBtn").addEventListener("click", sendRcon);
-  $("#rconCommand").addEventListener("keypress", (e) => {
-    if (e.key === 'Enter') sendRcon();
+  $("#rconCommand").addEventListener("keydown", handleRconCommandKeydown);
+  $("#rconCommand").addEventListener("input", () => {
+    resetRconHistoryCursor();
   });
   $("#cvarRefreshBtn").addEventListener("click", refreshInspector);
   $("#saveRconPasswordInput").addEventListener("change", async (e) => {
