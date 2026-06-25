@@ -20,8 +20,6 @@ use anne_server_browser::{
     TauriSaveApiConfigRequest, TauriSaveRconPasswordRequest, TauriServerQuery, TauriServerRows,
     TauriSourceBansInput, TauriUpdateInfo,
 };
-use tauri::Manager;
-
 async fn run_blocking<T, F>(task: F) -> Result<T, String>
 where
     T: Send + 'static,
