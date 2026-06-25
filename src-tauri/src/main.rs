@@ -20,6 +20,7 @@ use anne_server_browser::{
     TauriSaveApiConfigRequest, TauriSaveRconPasswordRequest, TauriServerQuery, TauriServerRows,
     TauriSourceBansInput, TauriUpdateInfo,
 };
+use tauri::Manager;
 
 async fn run_blocking<T, F>(task: F) -> Result<T, String>
 where
@@ -130,14 +131,23 @@ async fn check_update() -> Result<TauriUpdateInfo, String> {
 
 #[tauri::command]
 async fn install_update(
+    app: tauri::AppHandle,
     req: TauriInstallUpdateRequest,
 ) -> Result<TauriInstallUpdateResult, String> {
-    run_blocking(move || tauri_install_update(req)).await
+    let result = run_blocking(move || tauri_install_update(req)).await?;
+    if result.should_exit {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            app.exit(0);
+        });
+    }
+    Ok(result)
 }
 
 #[tauri::command]
-fn exit_app() {
-    std::process::exit(0);
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]

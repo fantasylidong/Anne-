@@ -114,8 +114,8 @@ cargo run --release -- --gui --config browser.example.toml
 发布示例：
 
 ```bash
-git tag Anne刷服器-v1.3.2
-git push origin Anne刷服器-v1.3.2
+git tag Anne刷服器-v1.3.3
+git push origin Anne刷服器-v1.3.3
 ```
 
 更新检查默认读取 `fantasylidong/anne-server-browser` 的 GitHub Release。Actions 构建时会自动把当前仓库 `${{ github.repository }}` 注入到程序里；如果以后仓库名变化，不需要改源码。

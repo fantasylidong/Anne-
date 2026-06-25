@@ -3,8 +3,8 @@ language = "zh-CN"
 anne_stats = true
 theme_mode = "light"
 accent_color = "#0f766e"
-auto_refresh_empty_secs = 120
-auto_refresh_active_secs = 30
+auto_refresh_empty_secs = 5
+auto_refresh_active_secs = 5
 auto_refresh_selected_secs = 5
 time_zone = "system"
 # RCON 密码可在桌面界面勾选保存后自动写入。

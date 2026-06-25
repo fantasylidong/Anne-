@@ -36,6 +36,8 @@ const ONLINE_STATS_AUTH_CACHE_TTL: Duration = Duration::from_secs(60);
 const ONLINE_STATS_ANON_CACHE_TTL: Duration = Duration::from_secs(600);
 const TAURI_PLAYER_CACHE_TTL: Duration = Duration::from_secs(60);
 const ONLINE_STATS_PAGE_LIMIT: usize = 512;
+const FAST_SERVER_QUERY_TIMEOUT_MS: u64 = 1500;
+const FAST_AUTO_REFRESH_SECS: u64 = 5;
 
 pub fn run_main() {
     if let Err(err) = run() {
@@ -91,6 +93,31 @@ fn executable_sidecar_dir() -> Option<PathBuf> {
     }
 
     Some(exe_dir.to_path_buf())
+}
+
+fn macos_app_root_from_exe(exe: &Path) -> Option<PathBuf> {
+    let exe_dir = exe.parent()?;
+    if exe_dir.file_name().and_then(|name| name.to_str()) != Some("MacOS") {
+        return None;
+    }
+    let contents_dir = exe_dir.parent()?;
+    if contents_dir.file_name().and_then(|name| name.to_str()) != Some("Contents") {
+        return None;
+    }
+    let app_bundle = contents_dir.parent()?;
+    (app_bundle.extension().and_then(|name| name.to_str()) == Some("app"))
+        .then(|| app_bundle.to_path_buf())
+}
+
+fn portable_update_root(exe: &Path) -> Option<PathBuf> {
+    #[cfg(any(target_os = "macos", test))]
+    {
+        if let Some(app_root) = macos_app_root_from_exe(exe) {
+            return Some(app_root);
+        }
+    }
+
+    exe.parent().map(Path::to_path_buf)
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -209,7 +236,7 @@ impl Default for RuntimeSettings {
             limit: 100,
             jobs: 32,
             master_timeout: Duration::from_millis(2500),
-            server_timeout: Duration::from_millis(1500),
+            server_timeout: Duration::from_millis(FAST_SERVER_QUERY_TIMEOUT_MS),
             http_timeout: Duration::from_millis(10_000),
             sort: SortKey::Players,
             min_players: None,
@@ -533,15 +560,19 @@ fn default_accent_color() -> String {
 }
 
 fn default_auto_refresh_empty_secs() -> u64 {
-    120
+    FAST_AUTO_REFRESH_SECS
 }
 
 fn default_auto_refresh_active_secs() -> u64 {
-    30
+    FAST_AUTO_REFRESH_SECS
 }
 
 fn default_auto_refresh_selected_secs() -> u64 {
-    5
+    FAST_AUTO_REFRESH_SECS
+}
+
+fn normalized_auto_refresh_secs(_seconds: u64) -> u64 {
+    FAST_AUTO_REFRESH_SECS
 }
 
 fn default_time_zone() -> String {
@@ -2724,9 +2755,11 @@ pub fn load_tauri_config_lists(config_path: Option<String>) -> Result<TauriConfi
         rcon_passwords: config.gui.rcon_passwords.clone(),
         theme_mode: config.gui.theme_mode.clone(),
         accent_color: config.gui.accent_color.clone(),
-        auto_refresh_empty_secs: config.gui.auto_refresh_empty_secs,
-        auto_refresh_active_secs: config.gui.auto_refresh_active_secs,
-        auto_refresh_selected_secs: config.gui.auto_refresh_selected_secs,
+        auto_refresh_empty_secs: normalized_auto_refresh_secs(config.gui.auto_refresh_empty_secs),
+        auto_refresh_active_secs: normalized_auto_refresh_secs(config.gui.auto_refresh_active_secs),
+        auto_refresh_selected_secs: normalized_auto_refresh_secs(
+            config.gui.auto_refresh_selected_secs,
+        ),
         time_zone: normalize_time_zone_setting(&config.gui.time_zone),
     })
 }
@@ -3288,11 +3321,14 @@ fn query_tauri_players_uncached(
     is_anne_server: Option<bool>,
 ) -> Result<Vec<TauriPlayerInfo>, String> {
     let endpoint = resolve_endpoint(address)?;
-    let timeout = Duration::from_millis(2500);
+    let timeout = Duration::from_millis(FAST_SERVER_QUERY_TIMEOUT_MS);
     let mut players = query_server_players(endpoint.socket, timeout)?;
     if config.gui.anne_stats {
         let is_anne_server = is_anne_server.unwrap_or_else(|| {
-            query_server_info(endpoint.socket, Duration::from_millis(1500))
+            query_server_info(
+                endpoint.socket,
+                Duration::from_millis(FAST_SERVER_QUERY_TIMEOUT_MS),
+            )
                 .map(|(info, _)| is_anne_server_info(&info))
                 .unwrap_or(false)
         });
@@ -3372,7 +3408,7 @@ pub fn tauri_query_players(
 
 pub fn tauri_run_rcon(req: TauriRconRequest) -> Result<String, String> {
     let timeout = Duration::from_millis(req.timeout_ms.unwrap_or(5000).max(500));
-    rcon_command(&req.address, &req.password, &req.command, timeout)
+    run_rcon_commands(&req.address, &req.password, &req.command, timeout)
 }
 
 pub fn tauri_read_cvars(req: TauriCvarRequest) -> Result<Vec<TauriCvarEntry>, String> {
@@ -3751,14 +3787,13 @@ pub fn tauri_save_gui_settings(req: TauriGuiSettingsRequest) -> Result<TauriConf
             config.gui.accent_color = accent_color.to_owned();
         }
     }
-    if let Some(seconds) = req.auto_refresh_empty_secs {
-        config.gui.auto_refresh_empty_secs = seconds.max(15);
-    }
-    if let Some(seconds) = req.auto_refresh_active_secs {
-        config.gui.auto_refresh_active_secs = seconds.max(5);
-    }
-    if let Some(seconds) = req.auto_refresh_selected_secs {
-        config.gui.auto_refresh_selected_secs = seconds.max(3);
+    if req.auto_refresh_empty_secs.is_some()
+        || req.auto_refresh_active_secs.is_some()
+        || req.auto_refresh_selected_secs.is_some()
+    {
+        config.gui.auto_refresh_empty_secs = FAST_AUTO_REFRESH_SECS;
+        config.gui.auto_refresh_active_secs = FAST_AUTO_REFRESH_SECS;
+        config.gui.auto_refresh_selected_secs = FAST_AUTO_REFRESH_SECS;
     }
     if let Some(time_zone) = req.time_zone {
         config.gui.time_zone = normalize_time_zone_setting(&time_zone);
@@ -5110,7 +5145,10 @@ impl NativeGuiApp {
 
                     if let Ok(socket_addr) = resolve_endpoint(&addr_str) {
                         if let Ok(players) =
-                            query_server_players(socket_addr.socket, Duration::from_millis(2500))
+                            query_server_players(
+                                socket_addr.socket,
+                                Duration::from_millis(FAST_SERVER_QUERY_TIMEOUT_MS),
+                            )
                         {
                             let mut res = results.lock().unwrap();
                             for p in players {
@@ -5746,11 +5784,12 @@ impl NativeGuiApp {
             address: self.rcon_address.clone(),
             password: self.rcon_password.clone(),
             command: self.rcon_command_text.clone(),
-            timeout_ms: Some(2500),
+            timeout_ms: Some(5000),
         };
         thread::spawn(move || {
-            let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(2500).max(1));
-            let result = rcon_command(&input.address, &input.password, &input.command, timeout);
+            let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(5000).max(1));
+            let result =
+                run_rcon_commands(&input.address, &input.password, &input.command, timeout);
             let _ = tx.send(GuiMessage::Rcon(result));
         });
     }
@@ -5777,7 +5816,7 @@ impl NativeGuiApp {
                 Some(self.cvar_password.clone())
             },
             names: Some(names),
-            timeout_ms: Some(4500),
+            timeout_ms: Some(FAST_SERVER_QUERY_TIMEOUT_MS),
         };
         thread::spawn(move || {
             let result = read_cvars(input);
@@ -5816,7 +5855,10 @@ impl NativeGuiApp {
         thread::spawn(move || {
             let result = resolve_endpoint(&address).and_then(|endpoint| {
                 let mut players =
-                    query_server_players(endpoint.socket, Duration::from_millis(4500))?;
+                    query_server_players(
+                        endpoint.socket,
+                        Duration::from_millis(FAST_SERVER_QUERY_TIMEOUT_MS),
+                    )?;
                 if should_apply_cached_stats {
                     let _ = apply_cached_player_stats(
                         &api_base_url,
@@ -5951,7 +5993,10 @@ impl eframe::App for NativeGuiApp {
             thread::spawn(move || {
                 if let Ok(endpoint) = resolve_endpoint(&address) {
                     let result =
-                        match query_server_info(endpoint.socket, Duration::from_millis(2500)) {
+                        match query_server_info(
+                            endpoint.socket,
+                            Duration::from_millis(FAST_SERVER_QUERY_TIMEOUT_MS),
+                        ) {
                         Ok((info, ping)) => Ok(ServerRowPayload {
                             address: address.clone(),
                             socket: endpoint.socket.to_string(),
@@ -6522,7 +6567,14 @@ impl eframe::App for NativeGuiApp {
                                         });
 
                                         ui.label(self.text(TextKey::Command));
-                                        ui.text_edit_singleline(&mut self.rcon_command_text);
+                                        ui.add(
+                                            egui::TextEdit::multiline(
+                                                &mut self.rcon_command_text,
+                                            )
+                                            .desired_rows(4)
+                                            .desired_width(f32::INFINITY)
+                                            .code_editor(),
+                                        );
 
                                         ui.horizontal(|ui| {
                                             if ui
@@ -8232,6 +8284,53 @@ fn rcon_command(
     Ok(output)
 }
 
+fn split_rcon_commands(value: &str) -> Vec<String> {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn run_rcon_commands(
+    address: &str,
+    password: &str,
+    commands: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let commands = split_rcon_commands(commands);
+    if commands.is_empty() {
+        return Err("rcon command cannot be empty".to_owned());
+    }
+
+    if commands.len() == 1 {
+        return rcon_command(address, password, &commands[0], timeout);
+    }
+
+    let mut output = String::new();
+    for command in commands {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str("> ");
+        output.push_str(&command);
+        output.push('\n');
+        match rcon_command(address, password, &command, timeout) {
+            Ok(result) => output.push_str(&result),
+            Err(err) => {
+                output.push_str("Error: ");
+                output.push_str(&err);
+            }
+        }
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+
+    Ok(output)
+}
+
 fn write_rcon_packet(stream: &mut TcpStream, id: i32, kind: i32, body: &str) -> Result<(), String> {
     let size = 4 + 4 + body.len() + 2;
     if size > i32::MAX as usize {
@@ -8269,7 +8368,12 @@ fn read_rcon_packet(stream: &mut TcpStream) -> Result<RconPacket, String> {
 }
 
 fn read_cvars(input: CvarRequest) -> Result<CvarPayload, String> {
-    let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(2500).max(1));
+    let timeout = Duration::from_millis(
+        input
+            .timeout_ms
+            .unwrap_or(FAST_SERVER_QUERY_TIMEOUT_MS)
+            .max(1),
+    );
     let names = input
         .names
         .unwrap_or_default()
@@ -9169,10 +9273,8 @@ fn launch_windows_portable_update(
 
     let current_exe =
         env::current_exe().map_err(|err| format!("failed to locate current exe: {err}"))?;
-    let app_dir = current_exe
-        .parent()
-        .ok_or_else(|| "failed to locate app directory".to_owned())?
-        .to_path_buf();
+    let app_dir = portable_update_root(&current_exe)
+        .ok_or_else(|| "failed to locate app directory".to_owned())?;
     let extract_dir = update_dir.join("extracted");
     let script_path = update_dir.join("apply-update.ps1");
     let script = format!(
@@ -9234,29 +9336,20 @@ fn launch_macos_portable_update(
     archive_path: &Path,
     update_dir: &Path,
 ) -> Result<TauriInstallUpdateResult, String> {
-    let extract_dir = update_dir.join("extracted");
-    fs::create_dir_all(&extract_dir)
-        .map_err(|err| format!("failed to create extract dir: {err}"))?;
-    let archive_arg = archive_path.display().to_string();
-    let extract_arg = extract_dir.display().to_string();
-    std::process::Command::new("tar")
-        .args(["-xzf", &archive_arg, "-C", &extract_arg])
-        .status()
-        .map_err(|err| format!("failed to extract update: {err}"))
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!("update extract failed with status {status}"))
-            }
-        })?;
-    std::process::Command::new("open")
-        .arg(&extract_dir)
-        .spawn()
-        .map_err(|err| format!("failed to open extracted update: {err}"))?;
+    let current_exe =
+        env::current_exe().map_err(|err| format!("failed to locate current executable: {err}"))?;
+    let update_root = portable_update_root(&current_exe)
+        .ok_or_else(|| "failed to locate current app directory".to_owned())?;
+    launch_unix_portable_update_script(
+        archive_path,
+        update_dir,
+        &update_root,
+        Some(&current_exe),
+        "open",
+    )?;
     Ok(TauriInstallUpdateResult {
-        message: format!("更新包已下载并解压到 {}", extract_dir.display()),
-        should_exit: false,
+        message: "更新包已下载，程序退出后会自动替换并重新启动。".to_owned(),
+        should_exit: true,
     })
 }
 
@@ -9265,30 +9358,126 @@ fn launch_linux_portable_update(
     archive_path: &Path,
     update_dir: &Path,
 ) -> Result<TauriInstallUpdateResult, String> {
-    let extract_dir = update_dir.join("extracted");
-    fs::create_dir_all(&extract_dir)
-        .map_err(|err| format!("failed to create extract dir: {err}"))?;
-    let archive_arg = archive_path.display().to_string();
-    let extract_arg = extract_dir.display().to_string();
-    std::process::Command::new("tar")
-        .args(["-xzf", &archive_arg, "-C", &extract_arg])
-        .status()
-        .map_err(|err| format!("failed to extract update: {err}"))
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!("update extract failed with status {status}"))
-            }
-        })?;
-    std::process::Command::new("xdg-open")
-        .arg(&extract_dir)
-        .spawn()
-        .map_err(|err| format!("failed to open extracted update: {err}"))?;
+    let current_exe =
+        env::current_exe().map_err(|err| format!("failed to locate current executable: {err}"))?;
+    let update_root = portable_update_root(&current_exe)
+        .ok_or_else(|| "failed to locate current app directory".to_owned())?;
+    launch_unix_portable_update_script(
+        archive_path,
+        update_dir,
+        &update_root,
+        Some(&current_exe),
+        "exec",
+    )?;
     Ok(TauriInstallUpdateResult {
-        message: format!("更新包已下载并解压到 {}", extract_dir.display()),
-        should_exit: false,
+        message: "更新包已下载，程序退出后会自动替换并重新启动。".to_owned(),
+        should_exit: true,
     })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn launch_unix_portable_update_script(
+    archive_path: &Path,
+    update_dir: &Path,
+    update_root: &Path,
+    current_exe: Option<&Path>,
+    relaunch_mode: &str,
+) -> Result<(), String> {
+    let extract_dir = update_dir.join("extracted");
+    let script_path = update_dir.join("apply-update.sh");
+    let script = unix_portable_update_script(
+        archive_path,
+        &extract_dir,
+        update_root,
+        current_exe,
+        std::process::id(),
+        relaunch_mode,
+    );
+    fs::write(&script_path, script)
+        .map_err(|err| format!("failed to write update script: {err}"))?;
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "nohup sh {} >/dev/null 2>&1 &",
+            sh_quote_path(&script_path)
+        ))
+        .spawn()
+        .map_err(|err| format!("failed to start update script: {err}"))?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn sh_quote_path(path: &Path) -> String {
+    sh_quote(&path.display().to_string())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn unix_portable_update_script(
+    archive_path: &Path,
+    extract_dir: &Path,
+    update_root: &Path,
+    current_exe: Option<&Path>,
+    pid: u32,
+    relaunch_mode: &str,
+) -> String {
+    let root_copy_target = update_root
+        .parent()
+        .map(sh_quote_path)
+        .unwrap_or_else(|| sh_quote("."));
+    let root_name = update_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sh_quote)
+        .unwrap_or_else(|| sh_quote(""));
+    let relaunch = match relaunch_mode {
+        "open" => format!("open {}\n", sh_quote_path(update_root)),
+        "exec" => current_exe
+            .map(|exe| format!("nohup {} >/dev/null 2>&1 &\n", sh_quote_path(exe)))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    format!(
+        r#"#!/bin/sh
+set -eu
+archive={archive}
+extract={extract}
+target={target}
+root_parent={root_parent}
+root_name={root_name}
+pid_to_wait={pid}
+while kill -0 "$pid_to_wait" 2>/dev/null; do
+  sleep 0.5
+done
+rm -rf "$extract"
+mkdir -p "$extract"
+tar -xzf "$archive" -C "$extract"
+root="$(find "$extract" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+if [ -z "$root" ]; then
+  echo "更新包内没有可替换目录" >&2
+  exit 1
+fi
+if [ -n "$root_name" ] && [ -d "$root/$root_name" ]; then
+  rm -rf "$target"
+  cp -R "$root/$root_name" "$root_parent/"
+else
+  mkdir -p "$target"
+  cp -R "$root"/. "$target/"
+fi
+{relaunch}"#,
+        archive = sh_quote_path(archive_path),
+        extract = sh_quote_path(extract_dir),
+        target = sh_quote_path(update_root),
+        root_parent = root_copy_target,
+        root_name = root_name,
+        pid = pid,
+        relaunch = relaunch,
+    )
 }
 
 #[cfg(test)]
@@ -9527,6 +9716,15 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_all_auto_refresh_intervals_to_fast_value() {
+        assert_eq!(normalized_auto_refresh_secs(120), FAST_AUTO_REFRESH_SECS);
+        assert_eq!(normalized_auto_refresh_secs(30), FAST_AUTO_REFRESH_SECS);
+        assert_eq!(default_auto_refresh_empty_secs(), FAST_AUTO_REFRESH_SECS);
+        assert_eq!(default_auto_refresh_active_secs(), FAST_AUTO_REFRESH_SECS);
+        assert_eq!(default_auto_refresh_selected_secs(), FAST_AUTO_REFRESH_SECS);
+    }
+
+    #[test]
     fn formats_broadcast_time_in_configured_zone() {
         assert_eq!(
             format_broadcast_time("2026-05-27 12:34:56", "UTC"),
@@ -9574,6 +9772,51 @@ mod tests {
             latest_update_tag_from_release_feed(feed).as_deref(),
             Some("Anne刷服器-v0.9.1")
         );
+    }
+
+    #[test]
+    fn splits_rcon_batch_commands_by_non_empty_lines() {
+        assert_eq!(
+            split_rcon_commands(" status \n\nmeta list\r\n sm_cvar z_difficulty hard "),
+            vec![
+                "status".to_owned(),
+                "meta list".to_owned(),
+                "sm_cvar z_difficulty hard".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn detects_macos_app_root_from_bundle_executable() {
+        let exe = Path::new("/Applications/Anne刷服器.app/Contents/MacOS/Anne刷服器");
+        assert_eq!(
+            macos_app_root_from_exe(exe),
+            Some(PathBuf::from("/Applications/Anne刷服器.app"))
+        );
+    }
+
+    #[test]
+    fn keeps_non_bundle_executable_directory_as_update_root() {
+        let exe = Path::new("/tmp/Anne刷服器");
+        assert_eq!(portable_update_root(exe), Some(PathBuf::from("/tmp")));
+    }
+
+    #[test]
+    fn unix_update_script_replaces_bundle_and_relaunches() {
+        let script = unix_portable_update_script(
+            Path::new("/tmp/update package.tar.gz"),
+            Path::new("/tmp/update dir/extracted"),
+            Path::new("/Applications/Anne刷服器.app"),
+            Some(Path::new("/Applications/Anne刷服器.app/Contents/MacOS/Anne刷服器")),
+            42,
+            "open",
+        );
+
+        assert!(script.contains("while kill -0 \"$pid_to_wait\""));
+        assert!(script.contains("rm -rf \"$target\""));
+        assert!(script.contains("cp -R \"$root/$root_name\" \"$root_parent/\""));
+        assert!(script.contains("open '/Applications/Anne刷服器.app'"));
+        assert!(script.contains("archive='/tmp/update package.tar.gz'"));
     }
 
     #[test]

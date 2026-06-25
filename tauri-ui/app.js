@@ -1,4 +1,5 @@
 import { getLocale, initI18n, setLocale, t } from './i18n.js';
+import { shouldSubmitRconCommand, splitRconCommands } from './rcon.js';
 
 const tauriInvoke = window.__TAURI__?.core?.invoke;
 const CONFIG_PATH_OVERRIDE_KEY = "configPathOverride";
@@ -9,7 +10,8 @@ const PING_MINI_WINDOW_MS = 5 * 60 * 1000;
 const PING_DETAIL_MIN_WINDOW_MS = 5 * 60 * 1000;
 const PING_MAX_CONNECT_GAP_MS = 45 * 1000;
 const PING_SMOOTHING_WINDOW = 3;
-const SELECTED_REFRESH_DEFAULT_SECS = 5;
+const FAST_SERVER_QUERY_TIMEOUT_MS = 1500;
+const FAST_AUTO_REFRESH_SECS = 5;
 const BROADCAST_REFRESH_INTERVAL_MS = 30 * 1000;
 const ANON_READ_CACHE_MS = 10 * 60 * 1000;
 const AUTH_READ_CACHE_MS = 60 * 1000;
@@ -46,9 +48,9 @@ const state = {
   sortDesc: true,
   autoRefreshTimer: null,
   broadcastRefreshTimer: null,
-  autoRefreshEmptySecs: 120,
-  autoRefreshActiveSecs: 30,
-  autoRefreshSelectedSecs: SELECTED_REFRESH_DEFAULT_SECS,
+  autoRefreshEmptySecs: FAST_AUTO_REFRESH_SECS,
+  autoRefreshActiveSecs: FAST_AUTO_REFRESH_SECS,
+  autoRefreshSelectedSecs: FAST_AUTO_REFRESH_SECS,
   timeZone: "system",
   pingHistory: new Map(),
   appStartedAt: Date.now(),
@@ -859,9 +861,9 @@ async function saveGuiSettings(partial) {
     state.anneStatsEnabled = lists.anne_stats !== false;
     state.themeMode = normalizeThemeMode(lists.theme_mode);
     state.accentColor = isHexColor(lists.accent_color) ? lists.accent_color : state.accentColor;
-    state.autoRefreshEmptySecs = clampRefreshSeconds(lists.auto_refresh_empty_secs, 120, 15);
-    state.autoRefreshActiveSecs = clampRefreshSeconds(lists.auto_refresh_active_secs, 30, 5);
-    state.autoRefreshSelectedSecs = clampRefreshSeconds(lists.auto_refresh_selected_secs, SELECTED_REFRESH_DEFAULT_SECS, 3);
+    state.autoRefreshEmptySecs = clampRefreshSeconds(lists.auto_refresh_empty_secs, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
+    state.autoRefreshActiveSecs = clampRefreshSeconds(lists.auto_refresh_active_secs, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
+    state.autoRefreshSelectedSecs = clampRefreshSeconds(lists.auto_refresh_selected_secs, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
     state.timeZone = normalizeTimeZone(lists.time_zone);
     state.rconPasswords = lists.rcon_passwords || {};
     applyTheme();
@@ -924,9 +926,9 @@ async function loadConfigLists() {
     state.rconPasswords = state.lists.rcon_passwords || {};
     state.themeMode = normalizeThemeMode(state.lists.theme_mode);
     state.accentColor = isHexColor(state.lists.accent_color) ? state.lists.accent_color : "#0f766e";
-    state.autoRefreshEmptySecs = clampRefreshSeconds(state.lists.auto_refresh_empty_secs, 120, 15);
-    state.autoRefreshActiveSecs = clampRefreshSeconds(state.lists.auto_refresh_active_secs, 30, 5);
-    state.autoRefreshSelectedSecs = clampRefreshSeconds(state.lists.auto_refresh_selected_secs, SELECTED_REFRESH_DEFAULT_SECS, 3);
+    state.autoRefreshEmptySecs = clampRefreshSeconds(state.lists.auto_refresh_empty_secs, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
+    state.autoRefreshActiveSecs = clampRefreshSeconds(state.lists.auto_refresh_active_secs, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
+    state.autoRefreshSelectedSecs = clampRefreshSeconds(state.lists.auto_refresh_selected_secs, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
     state.timeZone = normalizeTimeZone(state.lists.time_zone);
     const locale = uiLocaleFromConfig(state.lists.gui_language);
     setLocale(locale);
@@ -1399,7 +1401,7 @@ async function refreshInspector() {
       const password = $("#rconPassword").value.trim() || null;
       const names = parseCvarNames($("#cvarNames").value);
       const cvars = await invoke("read_cvars", {
-        req: { config_path: state.configPath, address, password, names, timeout_ms: 2500 }
+        req: { config_path: state.configPath, address, password, names, timeout_ms: FAST_SERVER_QUERY_TIMEOUT_MS }
       });
       if (state.selectedAddress !== address || state.inspectorTab !== "cvar") return;
       if (!cvars || cvars.length === 0) {
@@ -1432,13 +1434,6 @@ async function refreshInspector() {
       console.error(e);
     }
   }
-}
-
-function splitRconCommands(value) {
-  return String(value || "")
-    .split(/\r?\n/)
-    .map((command) => command.trim())
-    .filter(Boolean);
 }
 
 function resetRconHistoryCursor() {
@@ -1499,7 +1494,7 @@ function handleRconHistoryNavigation(event) {
 }
 
 function handleRconCommandKeydown(event) {
-  if (event.key === "Enter" && !event.shiftKey) {
+  if (shouldSubmitRconCommand(event)) {
     event.preventDefault();
     sendRcon();
     return;
@@ -2030,7 +2025,9 @@ async function installUpdate() {
     });
     $("#updateStatusMessage").textContent = result?.message || t("updateReadyToApply");
     if (result?.should_exit) {
-      setTimeout(() => invoke("exit_app"), 700);
+      setTimeout(() => {
+        invoke("exit_app").catch(() => {});
+      }, 300);
     } else {
       state.updateInstalling = false;
       syncDownloadPageButton();
@@ -2300,7 +2297,7 @@ function bindEvents() {
     }
   });
   $("#autoRefreshEmptyInput").addEventListener("change", async (e) => {
-    state.autoRefreshEmptySecs = clampRefreshSeconds(e.currentTarget.value, 120, 15);
+    state.autoRefreshEmptySecs = clampRefreshSeconds(e.currentTarget.value, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
     e.currentTarget.value = state.autoRefreshEmptySecs;
     try {
       await saveGuiSettings({ auto_refresh_empty_secs: state.autoRefreshEmptySecs });
@@ -2311,7 +2308,7 @@ function bindEvents() {
     }
   });
   $("#autoRefreshActiveInput").addEventListener("change", async (e) => {
-    state.autoRefreshActiveSecs = clampRefreshSeconds(e.currentTarget.value, 30, 5);
+    state.autoRefreshActiveSecs = clampRefreshSeconds(e.currentTarget.value, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
     e.currentTarget.value = state.autoRefreshActiveSecs;
     try {
       await saveGuiSettings({ auto_refresh_active_secs: state.autoRefreshActiveSecs });
@@ -2322,7 +2319,7 @@ function bindEvents() {
     }
   });
   $("#autoRefreshSelectedInput").addEventListener("change", async (e) => {
-    state.autoRefreshSelectedSecs = clampRefreshSeconds(e.currentTarget.value, SELECTED_REFRESH_DEFAULT_SECS, 3);
+    state.autoRefreshSelectedSecs = clampRefreshSeconds(e.currentTarget.value, FAST_AUTO_REFRESH_SECS, FAST_AUTO_REFRESH_SECS);
     e.currentTarget.value = state.autoRefreshSelectedSecs;
     try {
       await saveGuiSettings({ auto_refresh_selected_secs: state.autoRefreshSelectedSecs });
