@@ -1,5 +1,6 @@
 import { getLocale, initI18n, setLocale, t } from './i18n.js';
 import { shouldSubmitRconCommand, splitRconCommands } from './rcon.js';
+import { runAutoRefreshTick } from './auto-refresh.js';
 
 const tauriInvoke = window.__TAURI__?.core?.invoke;
 const CONFIG_PATH_OVERRIDE_KEY = "configPathOverride";
@@ -1150,36 +1151,12 @@ function startAutoRefreshLoop() {
   state.lastActiveRefreshAt = Date.now();
   state.lastSelectedRefreshAt = Date.now();
   state.autoRefreshTimer = setInterval(() => {
-    if (state.busy) return;
-    const now = Date.now();
-    const selected = selectedServerSocket();
-    const selectedDue = selected && now - state.lastSelectedRefreshAt >= state.autoRefreshSelectedSecs * 1000;
-    const activeDue = now - state.lastActiveRefreshAt >= state.autoRefreshActiveSecs * 1000;
-    const fullDue = now - state.lastFullRefreshAt >= state.autoRefreshEmptySecs * 1000;
-
-    if (fullDue) {
-      state.lastFullRefreshAt = now;
-      state.lastActiveRefreshAt = now;
-      state.lastSelectedRefreshAt = now;
-      refreshServers({ silent: true });
-      return;
-    }
-
-    if (activeDue) {
-      const sockets = activeServerSockets();
-      if (selectedDue && selected && !sockets.includes(selected)) sockets.push(selected);
-      state.lastActiveRefreshAt = now;
-      if (sockets.length > 0) {
-        if (selectedDue) state.lastSelectedRefreshAt = now;
-        refreshServers({ silent: true, sockets });
-        return;
-      }
-    }
-
-    if (selectedDue) {
-      state.lastSelectedRefreshAt = now;
-      refreshServers({ silent: true, sockets: [selected] });
-    }
+    runAutoRefreshTick(state, {
+      now: Date.now(),
+      selectedServerSocket,
+      activeServerSockets,
+      refreshServers,
+    });
   }, 1000);
 }
 
